@@ -1,0 +1,51 @@
+version: 0.2
+
+env:
+  variables:
+    S3_BUCKET: ""           # set via environment variable in CodeBuild
+    DISTRIBUTION_ID: ""     # optional
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Install step (only runs if package.json exists)"
+  build:
+    commands:
+      # If Node project, build it
+      - |
+        if [ -f package.json ]; then
+          echo "Node project detected"
+          npm ci
+          # Prefer 'build' if defined; fall back to framework defaults
+          if npm run | grep -q " build"; then
+            npm run build
+          fi
+          # Next.js static export (if defined)
+          if grep -q "next export" package.json || npm run | grep -q " export"; then
+            npm run export || true
+          fi
+        else
+          echo "No package.json found — treating as plain static site"
+        fi
+  post_build:
+    commands:
+      # Pick output folder automatically: out (Next export) > dist (Vite) > build (CRA) > repo root
+      - |
+        if [ -d out ]; then SRC="out";
+        elif [ -d dist ]; then SRC="dist";
+        elif [ -d build ]; then SRC="build";
+        else SRC="."; fi
+      - echo "Deploying from $SRC to s3://$S3_BUCKET/"
+      - aws s3 sync "$SRC" "s3://$S3_BUCKET/" --delete --exclude ".git/*" --exclude "node_modules/*"
+      # Optional CloudFront cache bust
+      - |
+        if [ -n "$DISTRIBUTION_ID" ]; then
+          echo "Creating CloudFront invalidation"
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+        fi
+
+artifacts:
+  files:
+    - '**/*'   # harmless; CodePipeline expects an output artifact
